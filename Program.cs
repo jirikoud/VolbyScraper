@@ -14,7 +14,7 @@ namespace Volby
         static void Main(string[] args)
         {
             var scraper = new DistrictScraper();
-            scraper.Scrape();
+            scraper.ScrapeMunicipality();
             Console.WriteLine("Press enter to continue");
             Console.ReadLine();
         }

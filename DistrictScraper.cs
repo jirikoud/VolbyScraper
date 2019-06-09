@@ -13,7 +13,8 @@ namespace Volby
 {
     public class DistrictScraper
     {
-        private List<string> PartyList = new List<string>() { "Občanská demokratická strana", "Česká pirátská strana", "Koalice STAN, TOP 09", "ANO 2011", "Svob.a př.dem.-T.Okamura (SPD)", "Křes».demokr.unie-Čs.str.lid.", "Komunistická str.Čech a Moravy" };
+        private List<string> PartyListEuro = new List<string>() { "Občanská demokratická strana", "Česká pirátská strana", "Koalice STAN, TOP 09", "ANO 2011", "Svob.a př.dem.-T.Okamura (SPD)", "Křes».demokr.unie-Čs.str.lid.", "Komunistická str.Čech a Moravy" };
+        private List<string> PartyListMunicipality = new List<string>() { "Občanská demokratická strana", "Zelení a Piráti pro 13", "LIDOVCI (KDU-ČSL) A STAN", "ANO 2011", "TOP 09", "Svob.a př.dem.-T.Okamura (SPD)", "Komunistická str.Čech a Moravy", "Svobodní z Prahy 13", "Společ.proti výst.v Prok.údolí", "Česká str.sociálně demokrat." };
 
         private int GetCellIntValue(HtmlDocument document, string xPath)
         {
@@ -30,31 +31,31 @@ namespace Volby
             return double.Parse(stringValue);
         }
 
-        private void WriteToExcel(List<District> districtList)
+        private void WriteToExcel(List<District> districtList, List<string> partyList)
         {
             var workbook = new HSSFWorkbook();
             var sheet = workbook.CreateSheet("Praha 13");
             var rowIndex = 0;
             var row = sheet.CreateRow(rowIndex);
             row.CreateCell(0).SetCellValue("Okrsek");
-            for (int index = 0; index < PartyList.Count; index++)
+            for (int index = 0; index < partyList.Count; index++)
             {
-                row.CreateCell(1 + index).SetCellValue(PartyList[index]);
+                row.CreateCell(1 + index).SetCellValue(partyList[index]);
             }
-            row.CreateCell(1 + PartyList.Count).SetCellValue("Voliči");
-            row.CreateCell(2 + PartyList.Count).SetCellValue("Hlasy");
+            row.CreateCell(1 + partyList.Count).SetCellValue("Voliči");
+            row.CreateCell(2 + partyList.Count).SetCellValue("Hlasy");
             rowIndex++;
 
             foreach (var district in districtList)
             {
                 var districtRow = sheet.CreateRow(rowIndex);
                 districtRow.CreateCell(0).SetCellValue(district.Code);
-                for (int index = 0; index < PartyList.Count; index++)
+                for (int index = 0; index < partyList.Count; index++)
                 {
                     districtRow.CreateCell(1 + index).SetCellValue(district.PartyList[index].Result);
                 }
-                districtRow.CreateCell(1 + PartyList.Count).SetCellValue(district.TotalVoters);
-                districtRow.CreateCell(2 + PartyList.Count).SetCellValue(district.Voted);
+                districtRow.CreateCell(1 + partyList.Count).SetCellValue(district.TotalVoters);
+                districtRow.CreateCell(2 + partyList.Count).SetCellValue(district.Voted);
                 rowIndex++;
             }
 
@@ -62,9 +63,10 @@ namespace Volby
             {
                 workbook.Write(fileData);
             }
+            Console.WriteLine("XLS file written.");
         }
 
-        public void Scrape()
+        public void ScrapeEuro()
         {
             var districtList = new List<District>();
             try
@@ -85,7 +87,7 @@ namespace Volby
                         document.LoadHtml(htmlCode);
                         district.TotalVoters = GetCellIntValue(document, "//td[@class='cislo'][@headers='sa2']");
                         district.Voted = GetCellIntValue(document, "//td[@class='cislo'][@headers='sa6']");
-                        foreach (var party in PartyList)
+                        foreach (var party in PartyListEuro)
                         {
                             var row = document.DocumentNode.SelectSingleNode($"//td[text()='{party}']").ParentNode;
                             foreach (var childNode in row.ChildNodes)
@@ -103,7 +105,7 @@ namespace Volby
                         districtList.Add(district);
                     }
                 }
-                WriteToExcel(districtList);
+                WriteToExcel(districtList, PartyListEuro);
             }
             catch (Exception exception)
             {
@@ -118,5 +120,54 @@ namespace Volby
                 }
             }
         }
+
+        public void ScrapeMunicipality()
+        {
+            var districtList = new List<District>();
+            try
+            {
+                using (var webClient = new WebClient()) // WebClient class inherits IDisposable
+                {
+                    for (int index = 0; index < 57; index++)
+                    {
+                        var district = new District()
+                        {
+                            Code = (13000 + (index + 1)).ToString(),
+                            PartyList = new List<PartyResult>(),
+                        };
+
+                        var url = $"https://volby.cz/pls/kv2018/kv1111?xjazyk=CZ&xid=0&xdz=5&xnumnuts=1100&xobec=539694&xokrsek={district.Code}&xstat=0&xvyber=1";
+                        string htmlCode = webClient.DownloadString(url);
+                        var document = new HtmlDocument();
+                        document.LoadHtml(htmlCode);
+                        district.TotalVoters = GetCellIntValue(document, "//td[@class='cislo'][@headers='sa4']");
+                        district.Voted = GetCellIntValue(document, "//td[@class='cislo'][@headers='sa7']");
+                        foreach (var party in PartyListMunicipality)
+                        {
+                            var row = document.DocumentNode.SelectSingleNode($"//td[text()='{party}']").ParentNode;
+                            foreach (var childNode in row.ChildNodes)
+                            {
+                                if (childNode.NodeType == HtmlNodeType.Element && childNode.Attributes["headers"].Value == "t2sa3 t2sb4")
+                                {
+                                    district.PartyList.Add(new PartyResult()
+                                    {
+                                        PartyName = party,
+                                        Result = GetDoubleValue(childNode),
+                                    });
+                                    break;
+                                }
+                            }
+                        }
+                        districtList.Add(district);
+                    }
+                }
+                WriteToExcel(districtList, PartyListMunicipality);
+            }
+            catch (Exception exception)
+            {
+                Console.WriteLine(exception.ToString());
+            }
+        }
+
     }
 }
