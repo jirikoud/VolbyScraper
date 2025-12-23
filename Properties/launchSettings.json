@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "Volby": {
+      "commandName": "Project",
+      "commandLineArgs": "--debug"
+    }
+  }
+}

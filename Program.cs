@@ -1,22 +1,13 @@
-﻿using HtmlAgilityPack;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Net;
-using System.Text;
-using System.Threading.Tasks;
-using Volby.Model;
+﻿namespace Volby;
 
-namespace Volby
+class Program
 {
-    class Program
+    static void Main(string[] args)
     {
-        static void Main(string[] args)
-        {
-            var scraper = new DistrictScraper();
-            scraper.ScrapeMunicipality();
-            Console.WriteLine("Press enter to continue");
-            Console.ReadLine();
-        }
+        var isDebugMode = (args?.Any(item => item == "--debug") == true);
+        var scraper = new DistrictScraper(isDebugMode);
+        scraper.ScrapeMunicipality();
+        Console.WriteLine("Press enter to continue");
+        Console.ReadLine();
     }
 }

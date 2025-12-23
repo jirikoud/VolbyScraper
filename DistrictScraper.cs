@@ -1,173 +1,246 @@
 ﻿using HtmlAgilityPack;
 using NPOI.HSSF.UserModel;
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Net;
-using System.Text;
-using System.Threading.Tasks;
+using System.Web;
 using Volby.Model;
 
-namespace Volby
+namespace Volby;
+
+public class DistrictScraper(
+    bool isDebugMode
+    ) : IDisposable
 {
-    public class DistrictScraper
+    private const string BASE_URL = "https://www.volby.cz/pls/kv2022/";
+
+    private bool _isDebugMode = isDebugMode;
+    private HttpClient _httpClient = new HttpClient();
+
+    public void Dispose()
     {
-        private List<string> PartyListEuro = new List<string>() { "Občanská demokratická strana", "Česká pirátská strana", "Koalice STAN, TOP 09", "ANO 2011", "Svob.a př.dem.-T.Okamura (SPD)", "Křes».demokr.unie-Čs.str.lid.", "Komunistická str.Čech a Moravy" };
-        private List<string> PartyListMunicipality = new List<string>() { "Občanská demokratická strana", "Zelení a Piráti pro 13", "LIDOVCI (KDU-ČSL) A STAN", "ANO 2011", "TOP 09", "Svob.a př.dem.-T.Okamura (SPD)", "Komunistická str.Čech a Moravy", "Svobodní z Prahy 13", "Společ.proti výst.v Prok.údolí", "Česká str.sociálně demokrat." };
+        _httpClient.Dispose();
+    }
 
-        private int GetCellIntValue(HtmlDocument document, string xPath)
-        {
-            var stringValue = document.DocumentNode.SelectSingleNode(xPath).InnerText;
-            stringValue = stringValue.Replace("&nbsp;", "");
-            return int.Parse(stringValue);
-        }
+    private int GetIntValue(HtmlNode node)
+    {
+        var stringValue = node.InnerText;
+        stringValue = stringValue.Replace("&nbsp;", "");
+        return int.Parse(stringValue);
+    }
 
-        private double GetDoubleValue(HtmlNode node)
-        {
-            var stringValue = node.InnerText;
-            stringValue = stringValue.Replace("&nbsp;", "");
-            stringValue = stringValue.Replace(",", ".");
-            return double.Parse(stringValue);
-        }
+    private int GetCellIntValue(HtmlDocument document, string xPath)
+    {
+        var stringValue = document.DocumentNode.SelectSingleNode(xPath).InnerText;
+        stringValue = stringValue.Replace("&nbsp;", "");
+        return int.Parse(stringValue);
+    }
 
-        private void WriteToExcel(List<District> districtList, List<string> partyList)
+    private double GetDoubleValue(HtmlNode node)
+    {
+        var stringValue = node.InnerText;
+        stringValue = stringValue.Replace("&nbsp;", "");
+        stringValue = stringValue.Replace(",", ".");
+        return double.Parse(stringValue);
+    }
+
+    private HtmlDocument LoadHtmlDocument(string url)
+    {
+        string htmlCode = _httpClient.GetStringAsync(url).Result;
+        var document = new HtmlDocument();
+        document.LoadHtml(htmlCode);
+        return document;
+    }
+
+    private void LoadParties(MunicipalityModel municipality)
+    {
+        try
         {
-            var workbook = new HSSFWorkbook();
-            var sheet = workbook.CreateSheet("Praha 13");
-            var rowIndex = 0;
-            var row = sheet.CreateRow(rowIndex);
-            row.CreateCell(0).SetCellValue("Okrsek");
-            for (int index = 0; index < partyList.Count; index++)
+            var document = LoadHtmlDocument(municipality.Url);
+
+            municipality.UsedEnvelopes = GetCellIntValue(document, "//td[@class='cislo'][@headers='sa7']");
+            municipality.ValidVotes = GetCellIntValue(document, "//td[@class='cislo'][@headers='sa8']");
+
+            var nodeList = document.DocumentNode.SelectNodes("//td[@class='cislo'][@headers='t2sa2 t2sb1']");
+            if (nodeList != null)
             {
-                row.CreateCell(1 + index).SetCellValue(partyList[index]);
+                foreach (var node in nodeList)
+                {
+                    var parent = node.ParentNode;
+                    if (node.FirstChild == null || !node.FirstChild.HasAttributes)
+                    {
+                        continue;
+                    }
+                    var urlPath = node.FirstChild.Attributes["href"].Value;
+                    var nameNode = parent.SelectSingleNode("td[@headers='t2sa2 t2sb2']");
+                    var party = new PartyModel()
+                    {
+                        Url = BASE_URL + HttpUtility.HtmlDecode(urlPath),
+                        Name = nameNode.InnerText,
+                    };
+                    municipality.Parties.Add(party);
+                }
             }
-            row.CreateCell(1 + partyList.Count).SetCellValue("Voliči");
-            row.CreateCell(2 + partyList.Count).SetCellValue("Hlasy");
+        }
+        catch
+        {
+            Console.WriteLine($"Load parties failed for municipality: '{municipality.Name}', URL: {municipality.Url}");
+            throw;
+        }
+    }
+
+    private List<MunicipalityModel> GetMunicipalities(List<CountyModel> counties)
+    {
+        var municipalities = new List<MunicipalityModel>();
+        foreach (var county in counties)
+        {
+            Console.WriteLine($"Processing county: '{county.Name}'");
+
+            var document = LoadHtmlDocument(county.Url);
+
+            var nodeList = document.DocumentNode.SelectNodes("//td[@class='cislo'][@headers='sa1 sb1']");
+            foreach (var node in nodeList)
+            {
+                var parent = node.ParentNode;
+                var urlPath = node.FirstChild.Attributes["href"].Value;
+                var nameNode = parent.SelectSingleNode("td[@headers='sa1 sb2']");
+                var municipality = new MunicipalityModel()
+                {
+                    Url = BASE_URL + HttpUtility.HtmlDecode(urlPath),
+                    Name = nameNode.InnerText,
+                    County = county.Name,
+                    Parties = [],
+                };
+                municipalities.Add(municipality);
+                Console.WriteLine($"Identified municipality '{municipality.Name}'");
+
+                LoadParties(municipality);
+                Console.WriteLine($"Loaded parties for '{municipality.Name}'");
+
+                if (_isDebugMode) break;
+            }
+        }
+        return municipalities;
+    }
+
+    private List<CountyModel> GetCounties()
+    {
+        var document = LoadHtmlDocument(BASE_URL + "kv12?xjazyk=CZ&xid=0");
+
+        var counties = new List<CountyModel>();
+        for (int index = 2; index < 16; index++)
+        {
+            var nodeList = document.DocumentNode.SelectNodes($"//td[@headers='t{index}sa1 t{index}sb2']");
+            foreach (var node in nodeList)
+            {
+                var urlNode = node.ParentNode.SelectSingleNode($"td[@headers='t{index}sa3']");
+                var urlPath = urlNode.FirstChild.Attributes["href"].Value;
+                var county = new CountyModel()
+                {
+                    Name = node.InnerText,
+                    Url = BASE_URL + HttpUtility.HtmlDecode(urlPath),
+                };
+                counties.Add(county);
+                Console.WriteLine($"Identified county '{county.Name}'");
+
+                if (_isDebugMode) break;
+            }
+        }
+        return counties;
+    }
+
+    private List<OmegaModel> FindOmegaCandidates(List<MunicipalityModel> municipalities)
+    {
+        var omegaData = new List<OmegaModel>();
+        foreach (var municipality in municipalities)
+        {
+            Console.WriteLine($"Processing municipality: '{municipality.Name}'");
+            if (municipality.Parties.Count < 5)
+            {
+                // Skip municipalities with less than 5 parties.
+                continue;
+            }
+            int omegaTotal = 0;
+            foreach (var party in municipality.Parties)
+            {
+                var document = LoadHtmlDocument(party.Url);
+
+                int? omegaVotes = null;
+                var nodeList = document.DocumentNode.SelectNodes("//td[@class='cislo'][@headers='sa2 sb3']");
+                foreach (var node in nodeList)
+                {
+                    var votes = GetIntValue(node);
+                    if (omegaVotes == null || omegaVotes.Value > votes)
+                    {
+                        omegaVotes = votes;
+                    }
+                }
+                if (omegaVotes != null)
+                {
+                    omegaTotal += omegaVotes.Value;
+                }
+            }
+
+            var omega = new OmegaModel()
+            {
+                Municipality = municipality.Name,
+                County = municipality.County,
+                UsedEnvelopes = municipality.UsedEnvelopes,
+                ValidVotes = municipality.ValidVotes,
+                OmegaVotes = omegaTotal,
+                Url = municipality.Url,
+            };
+            omegaData.Add(omega);
+        }
+        return omegaData;
+    }
+
+    private void WriteToExcel(List<OmegaModel> omegaData)
+    {
+        using var workbook = new HSSFWorkbook();
+        var sheet = workbook.CreateSheet("OmegaVotes");
+        var rowIndex = 0;
+        var row = sheet.CreateRow(rowIndex);
+        row.CreateCell(0).SetCellValue("Obec");
+        row.CreateCell(1).SetCellValue("Okres");
+        row.CreateCell(2).SetCellValue("Odevzdané obálky");
+        row.CreateCell(3).SetCellValue("Platné hlasy");
+        row.CreateCell(4).SetCellValue("Součet hlasů");
+        row.CreateCell(5).SetCellValue("Odkaz");
+        rowIndex++;
+
+        foreach (var dataRecord in omegaData)
+        {
+            var municipalityRow = sheet.CreateRow(rowIndex);
+            municipalityRow.CreateCell(0).SetCellValue(dataRecord.Municipality);
+            municipalityRow.CreateCell(1).SetCellValue(dataRecord.County);
+            municipalityRow.CreateCell(2).SetCellValue(dataRecord.UsedEnvelopes);
+            municipalityRow.CreateCell(3).SetCellValue(dataRecord.ValidVotes);
+            municipalityRow.CreateCell(4).SetCellValue(dataRecord.OmegaVotes);
+            municipalityRow.CreateCell(5).SetCellValue(dataRecord.Url);
             rowIndex++;
-
-            foreach (var district in districtList)
-            {
-                var districtRow = sheet.CreateRow(rowIndex);
-                districtRow.CreateCell(0).SetCellValue(district.Code);
-                for (int index = 0; index < partyList.Count; index++)
-                {
-                    districtRow.CreateCell(1 + index).SetCellValue(district.PartyList[index].Result);
-                }
-                districtRow.CreateCell(1 + partyList.Count).SetCellValue(district.TotalVoters);
-                districtRow.CreateCell(2 + partyList.Count).SetCellValue(district.Voted);
-                rowIndex++;
-            }
-
-            using (var fileData = new FileStream("Vysledky.xls", FileMode.Create))
-            {
-                workbook.Write(fileData);
-            }
-            Console.WriteLine("XLS file written.");
         }
 
-        public void ScrapeEuro()
+        var fileName = $"OmegaVotes_{DateTime.Now:yyyyMMddhhmmss}.xls";
+        using (var fileData = new FileStream(fileName, FileMode.Create))
         {
-            var districtList = new List<District>();
-            try
-            {
-                using (var webClient = new WebClient()) // WebClient class inherits IDisposable
-                {
-                    for (int index = 0; index < 57; index++)
-                    {
-                        var district = new District()
-                        {
-                            Code = (13000 + (index + 1)).ToString(),
-                            PartyList = new List<PartyResult>(),
-                        };
-
-                        var url = $"https://volby.cz/pls/ep2019/ep1311?xjazyk=CZ&xobec=539694&xokrsek={district.Code}&xvyber=1100";
-                        string htmlCode = webClient.DownloadString(url);
-                        var document = new HtmlDocument();
-                        document.LoadHtml(htmlCode);
-                        district.TotalVoters = GetCellIntValue(document, "//td[@class='cislo'][@headers='sa2']");
-                        district.Voted = GetCellIntValue(document, "//td[@class='cislo'][@headers='sa6']");
-                        foreach (var party in PartyListEuro)
-                        {
-                            var row = document.DocumentNode.SelectSingleNode($"//td[text()='{party}']").ParentNode;
-                            foreach (var childNode in row.ChildNodes)
-                            {
-                                if (childNode.NodeType == HtmlNodeType.Element && (childNode.Attributes["headers"].Value == "t1sa2 t1sb4" || childNode.Attributes["headers"].Value == "t2sa2 t2sb4"))
-                                {
-                                    district.PartyList.Add(new PartyResult()
-                                    {
-                                        PartyName = party,
-                                        Result = GetDoubleValue(childNode),
-                                    });
-                                }
-                            }
-                        }
-                        districtList.Add(district);
-                    }
-                }
-                WriteToExcel(districtList, PartyListEuro);
-            }
-            catch (Exception exception)
-            {
-                Console.WriteLine(exception.ToString());
-            }
-            foreach (var district in districtList)
-            {
-                Console.WriteLine($"{district.Code} - {district.Voted} / {district.TotalVoters}");
-                foreach (var partyResult in district.PartyList)
-                {
-                    Console.WriteLine($"{partyResult.PartyName} - {partyResult.Result}");
-                }
-            }
+            workbook.Write(fileData);
         }
+        Console.WriteLine($"XLS file '{fileName}' written.");
+    }
 
-        public void ScrapeMunicipality()
+    public void ScrapeMunicipality()
+    {
+        try
         {
-            var districtList = new List<District>();
-            try
-            {
-                using (var webClient = new WebClient()) // WebClient class inherits IDisposable
-                {
-                    for (int index = 0; index < 57; index++)
-                    {
-                        var district = new District()
-                        {
-                            Code = (13000 + (index + 1)).ToString(),
-                            PartyList = new List<PartyResult>(),
-                        };
+            var counties = GetCounties();
 
-                        var url = $"https://volby.cz/pls/kv2018/kv1111?xjazyk=CZ&xid=0&xdz=5&xnumnuts=1100&xobec=539694&xokrsek={district.Code}&xstat=0&xvyber=1";
-                        string htmlCode = webClient.DownloadString(url);
-                        var document = new HtmlDocument();
-                        document.LoadHtml(htmlCode);
-                        district.TotalVoters = GetCellIntValue(document, "//td[@class='cislo'][@headers='sa4']");
-                        district.Voted = GetCellIntValue(document, "//td[@class='cislo'][@headers='sa7']");
-                        foreach (var party in PartyListMunicipality)
-                        {
-                            var row = document.DocumentNode.SelectSingleNode($"//td[text()='{party}']").ParentNode;
-                            foreach (var childNode in row.ChildNodes)
-                            {
-                                if (childNode.NodeType == HtmlNodeType.Element && childNode.Attributes["headers"].Value == "t2sa3 t2sb4")
-                                {
-                                    district.PartyList.Add(new PartyResult()
-                                    {
-                                        PartyName = party,
-                                        Result = GetDoubleValue(childNode),
-                                    });
-                                    break;
-                                }
-                            }
-                        }
-                        districtList.Add(district);
-                    }
-                }
-                WriteToExcel(districtList, PartyListMunicipality);
-            }
-            catch (Exception exception)
-            {
-                Console.WriteLine(exception.ToString());
-            }
+            var municipalities = GetMunicipalities(counties);
+
+            var omegaData = FindOmegaCandidates(municipalities);
+
+            WriteToExcel(omegaData);
         }
-
+        catch (Exception exception)
+        {
+            Console.WriteLine(exception.ToString());
+        }
     }
 }
